@@ -1,0 +1,423 @@
+default:
+  tags:
+    - onpremise
+
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH != "production"
+      when: never
+    - when: always
+
+stages:
+  - test
+  - build
+  - deploy
+  - cleanup
+
+variables:
+  USERNAME: $USERNAME
+  HOST: $HOST
+  PASSWORD_SERVER: $PASSWORD_SERVER
+  PROD_ENDPOINT: https://do.goavana.com
+
+run_unit_tests:
+  stage: test
+  script:
+    - echo "Running unit test"
+  only:
+    - production
+
+# DO FRONT
+build_image_front:
+  stage: build
+  script:
+    - sshpass -p $PASSWORD_SERVER ssh -o StrictHostKeyChecking=no -l $USERNAME $HOST "
+      cd /home/rahona/all-do-app/do-frontend &&
+      git pull origin production &&
+      docker build -t dofront:latest . "
+  only:
+    changes:
+      - do-frontend/**/*
+    refs:
+      - production
+
+push_image_front:
+  stage: build
+  needs:
+    - build_image_front
+  before_script:
+    - export DATE_VERSION=$(date +%Y.%m.%d.%H.%M.%S)
+    - docker login -u $CI_REGISTRY_USERNAME_FRONT -p $CI_REGISTRY_PASSWORDD_FRONT
+  script:
+    - docker tag dofront:latest $CI_REGISTRY_IMAGEE_FRONT:$DATE_VERSION
+    - docker push $CI_REGISTRY_IMAGEE_FRONT:$DATE_VERSION
+    - docker rmi $CI_REGISTRY_IMAGEE_FRONT:$DATE_VERSION
+    - docker logout
+  only:
+    changes:
+      - do-frontend/**/*
+    refs:
+      - production
+
+deploy_to_production_front:
+  stage: deploy
+  before_script:
+    - export VERSION=$(cat version.txt)
+  script:
+    - sshpass -p $PASSWORD_SERVER ssh -o StrictHostKeyChecking=no -l $USERNAME $HOST "
+      cd /home/rahona/Microservice_Do_Ofisialy/Traefik_Microservice &&
+      docker-compose down || true &&
+      docker-compose up -d"
+  only:
+    changes:
+      - do-frontend/**/*
+    refs:
+      - production
+  environment:
+    name: production
+    url: $PROD_ENDPOINT
+
+cleanup_front:
+  stage: cleanup
+  script:
+    - sshpass -p $PASSWORD_SERVER ssh -o StrictHostKeyChecking=no -l $USERNAME $HOST "
+      cd /home/rahona/Microservice_Do_Ofisialy/Traefik_Microservice &&
+      ./cleanup.sh "
+  only:
+    changes:
+      - do-frontend/**/*
+    refs:
+      - production
+
+###### WEB RTC
+build_image_web_rtc:
+  stage: build
+  before_script:
+    - cd chat-service
+    - export PVERSION=$(cat package.json | jq -r .version)
+    - export VERSION=$PVERSION.$CI_PIPELINE_ID
+    - echo $VERSION > version.txt
+  script:
+    - sed -i 's/localhost/192.168.0.2/g' .env
+    - docker build -t $CI_REGISTRY_IMAGEE_WEB_RTC:$VERSION .
+  artifacts:
+    paths:
+      - chat-service/version.txt
+  only:
+    changes:
+      - chat-service/**/*
+    refs:
+      - production
+
+push_image_web_rtc:
+  stage: build
+  needs:
+    - build_image_web_rtc
+  before_script:
+    - cd chat-service
+    - export VERSION=$(cat version.txt)
+    - docker login -u $CI_REGISTRY_USERNAME_WEB_RTC -p $CI_REGISTRY_PASSWORDD_WEB_RTC
+  script:
+    - docker tag $CI_REGISTRY_IMAGEE_WEB_RTC:$VERSION todo_back_web-rtc-chat:latest
+    - docker push $CI_REGISTRY_IMAGEE_WEB_RTC:$VERSION
+    - docker rmi $CI_REGISTRY_IMAGEE_WEB_RTC:$VERSION
+    - docker logout
+  only:
+    changes:
+      - chat-service/**/*
+    refs:
+      - production
+
+deploy_to_prod_web_rtc:
+  stage: deploy
+  script:
+    - sshpass -p $PASSWORD_SERVER ssh -o StrictHostKeyChecking=no -l $USERNAME $HOST "
+      cd /home/rahona/Microservice_Do_Ofisialy/Traefik_Microservice &&
+      docker-compose down || true  &&
+      docker-compose up -d "
+
+  only:
+    changes:
+      - chat-service/**/*
+    refs:
+      - production
+  environment:
+    name: production
+    url: $PROD_ENDPOINT
+
+##### PRESENCE SERVICE
+
+build_image_presence:
+  stage: build
+  before_script:
+    - cd presence-service
+    - export PVERSION=$(cat package.json | jq -r .version)
+    - export VERSION=$PVERSION.$CI_PIPELINE_ID
+    - echo $VERSION > version.txt
+  script:
+    - docker build -t $CI_REGISTRY_IMAGEE_PRESENCE:$VERSION .
+  artifacts:
+    paths:
+      - presence-service/version.txt
+  only:
+    changes:
+      - presence-service/**/*
+    refs:
+      - production
+
+push_image_presence:
+  stage: build
+  needs:
+    - build_image_presence
+  before_script:
+    - cd presence-service
+    - export VERSION=$(cat version.txt)
+    - docker login -u $CI_REGISTRY_USERNAME_PRESENCE -p $CI_REGISTRY_PASSWORDD_PRESENCE
+  script:
+    - docker tag $CI_REGISTRY_IMAGEE_PRESENCE:$VERSION todo_back_do-app-presence-tallymanager:latest
+    - docker push $CI_REGISTRY_IMAGEE_PRESENCE:$VERSION
+  only:
+    changes:
+      - presence-service/**/*
+    refs:
+      - production
+
+deploy_to_prod_presence:
+  stage: deploy
+  before_script:
+    - cd presence-service
+    - export VERSION=$(cat version.txt)
+  script:
+    - sshpass -p $PASSWORD_SERVER ssh -o StrictHostKeyChecking=no -l $USERNAME $HOST "
+      cd /home/rahona/Microservice_Do_Ofisialy/Traefik_Microservice &&
+      docker-compose down || true &&
+      docker-compose up -d "
+  only:
+    changes:
+      - presence-service/**/*
+    refs:
+      - production
+  environment:
+    name: production
+    url: $PROD_ENDPOINT
+
+### TRACKING SERVICE
+build_image_tracking:
+  stage: build
+  before_script:
+    - cd tracking-service
+    - export PVERSION=$(cat package.json | jq -r .version)
+    - export VERSION=$PVERSION.$CI_PIPELINE_ID
+    - echo $VERSION > version.txt
+  script:
+    - cp .env.example .env
+    - sed -i 's/localhost/192.168.0.2/g' .env
+    - docker build -t tracking:latest .
+  artifacts:
+    paths:
+      - tracking-service/version.txt
+  only:
+    changes:
+      - tracking-service/**/*
+    refs:
+      - production
+
+push_image_tracking:
+  stage: build
+  needs:
+    - build_image_tracking
+  before_script:
+    - export VERSION=$(cat version.txt)
+    - docker login -u $CI_REGISTRY_USERNAME_TRACKING -p $CI_REGISTRY_PASSWORD_TRACKING
+  script:
+    - docker tag tracking:latest $CI_REGISTRY_IMAGEE_TRACKING:$VERSION
+    - docker push $CI_REGISTRY_IMAGEE_TRACKING:$VERSION
+    - docker rmi $CI_REGISTRY_IMAGEE_TRACKING:$VERSION
+  only:
+    changes:
+      - tracking-service/**/*
+    refs:
+      - production
+
+deploy_to_prod_tracking:
+  stage: deploy
+  script:
+    - sshpass -p $PASSWORD_SERVER ssh -o StrictHostKeyChecking=no -l $USERNAME $HOST "
+      cd /home/rahona/Microservice_Do_Ofisialy/Traefik_Microservice &&
+      docker-compose down || true &&
+      docker-compose up -d "
+  only:
+    changes:
+      - tracking-service/**/*
+    refs:
+      - production
+  environment:
+    name: production
+    url: $PROD_ENDPOINT
+
+### MAIL SERVICE
+
+build_image_mail:
+  stage: build
+  script:
+    - sshpass -p $PASSWORD_SERVER ssh -o StrictHostKeyChecking=no -l $USERNAME $HOST "
+      cd /home/rahona/all-do-app/mail-service &&
+      git checkout production &&
+      git pull origin production &&
+      docker build -t domailmodule:latest . "
+  only:
+    changes:
+      - mail-service/**/*
+    refs:
+      - production
+
+push_image_mail:
+  stage: build
+  needs:
+    - build_image_mail
+  before_script:
+    - export DATE_VERSION=$(date +%Y.%m.%d.%H.%M.%S)
+    - docker login -u $CI_REGISTRY_USERNAME_DOMAIL -p $CI_REGISTRY_PASSWORDD_DOMAIL
+  script:
+    - docker tag domailmodule:latest $CI_REGISTRY_IMAGEE_DOMAIL:$DATE_VERSION
+    - docker push "$CI_REGISTRY_IMAGEE_DOMAIL:$DATE_VERSION"
+    - docker rmi $CI_REGISTRY_IMAGEE_DOMAIL:$DATE_VERSION
+    - docker logout
+  only:
+    changes:
+      - mail-service/**/*
+    refs:
+      - production
+
+deploy_to_prod_mail:
+  stage: deploy
+  script:
+    - sshpass -p $PASSWORD_SERVER ssh -o StrictHostKeyChecking=no -l $USERNAME $HOST "
+      cd /home/rahona/Microservice_Do_Ofisialy/Traefik_Microservice &&
+      docker-compose down || true &&
+      docker-compose up -d "
+  only:
+    changes:
+      - mail-service/**/*
+    refs:
+      - production
+  environment:
+    name: production
+    url: $PROD_ENDPOINT
+
+### DO AUTH SERVICE
+
+build_image_auth:
+  stage: build
+  before_script:
+    - cd auth-service
+    - export PVERSION=$(cat package.json | jq -r .version)
+    - export VERSION=$PVERSION.$CI_PIPELINE_ID
+    - echo $VERSION > version.txt
+  script:
+    - sshpass -p $PASSWORD_SERVER ssh -o StrictHostKeyChecking=no -l $USERNAME $HOST "
+      cd /home/rahona/all-do-app/auth-service &&
+      git checkout production &&
+      git pull origin production &&
+      docker build --no-cache -t auth:latest . "
+  artifacts:
+    paths:
+      - auth-service/version.txt
+  only:
+    changes:
+      - auth-service/**/*
+    refs:
+      - production
+
+push_image_auth:
+  stage: build
+  needs:
+    - build_image_auth
+  before_script:
+    - cd auth-service
+    - export VERSION=$(cat version.txt)
+    - docker login -u $CI_REGISTRY_USERNAME_AUTH -p $CI_REGISTRY_PASSWORDD_AUTH
+  script:
+    - docker tag auth:latest $CI_REGISTRY_IMAGEE_AUTH:$VERSION
+    - docker push "$CI_REGISTRY_IMAGEE_AUTH:$VERSION"
+    - docker rmi "$CI_REGISTRY_IMAGEE_AUTH:$VERSION"
+    - docker logout
+  only:
+    changes:
+      - auth-service/**/*
+    refs:
+      - production
+
+deploy_to_prod_auth:
+  stage: deploy
+  script:
+    - sshpass -p $PASSWORD_SERVER ssh -o StrictHostKeyChecking=no -l $USERNAME $HOST "
+      cd /home/rahona/Microservice_Do_Ofisialy/Traefik_Microservice &&
+      docker-compose down || true &&
+      docker-compose up -d "
+  only:
+    changes:
+      - auth-service/**/*
+    refs:
+      - production
+  environment:
+    name: production
+    url: $PROD_ENDPOINT
+
+### DO BACKEND
+
+build_image_backend:
+  stage: build
+  before_script:
+    - cd do-backend
+    - export PVERSION=$(cat package.json | jq -r .version)
+    - export VERSION=$PVERSION.$CI_PIPELINE_ID
+    - echo $VERSION > version.txt
+  script:
+    - sshpass -p $PASSWORD_SERVER ssh -o StrictHostKeyChecking=no -l $USERNAME $HOST "
+      cd /home/rahona/all-do-app/do-backend &&
+      git pull origin production &&
+      docker build -t doapp-back:latest . "
+  artifacts:
+    paths:
+      - do-backend/version.txt
+  only:
+    changes:
+      - do-backend/**/*
+    refs:
+      - production
+
+push_image_backend:
+  stage: build
+  needs:
+    - build_image_backend
+  before_script:
+    - cd do-backend
+    - export VERSION=$(cat version.txt)
+    - docker login -u $CI_REGISTRY_USERNAME_NOTIFICATION -p $CI_REGISTRY_PASSWORDD_NOTIFICATION
+  script:
+    - docker tag doapp-back:latest $CI_REGISTRY_IMAGEE_NOTIFICATION:$VERSION
+    - docker push "$CI_REGISTRY_IMAGEE_NOTIFICATION:$VERSION"
+    - docker rmi $CI_REGISTRY_IMAGEE_NOTIFICATION:$VERSION
+    - docker logout
+  only:
+    changes:
+      - do-backend/**/*
+    refs:
+      - production
+
+deploy_to_prod_backend:
+  stage: deploy
+  script:
+    - sshpass -p $PASSWORD_SERVER ssh -o StrictHostKeyChecking=no -l $USERNAME $HOST "
+      cd /home/rahona/Microservice_Do_Ofisialy/Traefik_Microservice &&
+      docker-compose down || true &&
+      docker-compose up -d "
+  only:
+    changes:
+      - do-backend/**/*
+    refs:
+      - production
+  environment:
+    name: production
+    url: $PROD_ENDPOINT
